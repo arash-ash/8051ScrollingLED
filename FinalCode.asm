@@ -1,0 +1,845 @@
+ORG 0000h
+LJMP MAIN
+ORG 0003h
+LJMP EX0ISR
+ORG 000Bh
+LJMP T0ISR
+
+ORG 23H
+LJMP SERIAL
+
+CLK BIT P1.7
+CS BIT P1.6
+DIN BIT P1.5
+
+; ;;VARIABLES;; ;
+TI_ BIT 00
+CMODE BIT 01
+CMODE_SPEED BIT 02
+CMODE_BRIGHTNESS BIT 03
+DISPLAY_TEXT BIT 04
+STORE_CHAR BIT 05
+CLEAR_TEXT BIT 06
+
+
+;EEPROM
+eeprom_scl_pin  EQU P2.4  ;scl p2.4    a4h
+eeprom_sda_pin  EQU P2.5  ;sda p2.5    a5h
+memory_address1 EQU 3BH
+eeprom_data     EQU 3CH   ;Input when writing
+EEPROM_BUFF     EQU 3DH   ;Output when reading
+
+
+STILL_SENDING BIT 127
+STOP BIT 126
+INDEX_IN_CHAR EQU 36h
+CHAR_TO_SEND EQU 35h
+
+TEMP EQU 37h
+SPEED EQU 38h
+BRIGHT EQU 3Ah
+
+COUNTER EQU 39h
+
+WADDR EQU 30h
+WDATA EQU 31h
+
+LOCATION EQU 33h
+SERIAL_INDEX EQU 34h
+
+
+MAIN:
+MOV SP, #0Fh
+
+CLR P3.7 ; FOR TESTING THAT CHIP IS PROGRAMMED
+CLR CMODE
+CLR CMODE_SPEED
+CLR CMODE_BRIGHTNESS
+CLR DISPLAY_TEXT
+CLR CLEAR_TEXT
+
+MOV SPEED, #7
+MOV BRIGHT, #2
+
+MOV LOCATION, #0
+MOV CHAR_TO_SEND, #3Fh
+MOV INDEX_IN_CHAR, #1
+
+CLR CS
+CLR CLK
+CLR DIN
+
+MOV P1, #0FFH;	make P1 an input port
+MOV TMOD, #21H;	timer 1, mode 2(auto reload)
+MOV TH1, #0FDH;	9600 baud rate
+MOV SCON, #50H;	8-bit, 1 stop, REN enabled
+MOV IE, #10010000B;	enable serial interrupt
+SETB TR1;	 start timer 1
+
+
+CLR STOP
+CLR STILL_SENDING
+
+SETB RS0
+
+MOV DPTR, #TEST_DATA
+MOV R1, #40h
+MOV R7, #91
+FILL:
+CLR A
+MOVC A,@A+DPTR
+MOV @R1, A
+INC R1
+INC DPTR
+DJNZ R7, FILL
+
+
+MOV R0, #0B0h
+MOV R7, #64
+ZEROO:
+MOV @r0, #0
+INC R0
+DJNZ R7, ZEROO
+
+
+CLR RS0
+MOV DPTR,#MYDATA ;load pointer for message
+MESSAGE_AGAIN:
+CLR A
+MOVC A,@A+DPTR ;get the character
+JZ MESSAGE_DONE ;if last character get out
+
+CLR TI_
+MOV SBUF, A
+JNB TI_,$; waits for the TI signal from the interrupt
+
+INC DPTR
+SJMP MESSAGE_AGAIN ;next character
+MESSAGE_DONE:
+
+;----------INITIALIZE THE RAM WITH THE EEPROM DATA-------
+MOV R1, #40H
+MOV R7, #00H
+EEPROM_INITIALIZE_NEXT:
+MOV memory_address1, R7
+LCALL read_data
+MOV A, EEPROM_BUFF
+MOV @R1, A
+INC R7
+INC R1
+CJNE R1, #0A4H, EEPROM_INITIALIZE_SKIP
+MOV 50H, #5CH
+SJMP EEPROM_INITIALIZE_EXIT;	resets if not reached the max character limit(100)
+EEPROM_INITIALIZE_SKIP:
+CJNE @R1, #5CH, EEPROM_INITIALIZE_NEXT;	if reaches escape character \
+MOV R7, #00H;	resets the character pointer
+EEPROM_INITIALIZE_EXIT:
+
+
+
+MOV R0, #40H;	starting ram location for the characters in ram
+SETB RS0
+CONFIG:
+ACALL CONFIGURE
+
+CLR CS
+
+SETB ET0
+SETB EX0
+SETB IT0
+SETB EA
+
+BEGIN:
+
+ACALL READSHIFT
+
+;CLR CS
+MOV R0,#0B0h 
+MOV SERIAL_INDEX, #1
+MOV R7, #8
+OUT:
+MOV WADDR, SERIAL_INDEX
+
+MOV R6, #8
+IN:
+MOV WDATA, @R0
+ACALL SEND
+MOV A, R0
+CLR C
+ADD A, #8
+MOV R0,A
+DJNZ R6, IN
+
+SETB CS
+nop
+CLR CS
+
+INC SERIAL_INDEX
+MOV A, R0
+CLR C
+SUBB A, #3Fh
+MOV R0, A
+DJNZ R7, OUT
+
+CLR DIN
+
+
+ACALL CONFIGURE
+
+
+CLR DIN
+
+JNB STOP, KEEPGOING
+LCALL UPDATE_EEPROM
+JB STOP, $
+KEEPGOING:
+;AJMP BEGIN
+
+MOV DPTR, #SPEED_OPTS
+MOV A, SPEED
+MOVC A, @A+DPTR
+
+;MOV A,#1111111b
+MOV R7, #1
+HERE5:
+MOV r6, A
+here6:
+MOV r5, #0
+HERE4:
+DJNZ R5, HERE4
+DJNZ R6, here6
+DJNZ R7, HERE5
+
+
+; sends the string to serial
+CLR RS0
+MOV R1, #40H
+JNB DISPLAY_TEXT, MAIN_SKIP
+DISPLAY_TEXT_NEXT:
+MOV A, @R1
+CLR TI_
+MOV SBUF, A
+JNB TI_,$; waits for the TI signal from the interrupt
+INC R1
+CJNE A, #5CH, DISPLAY_TEXT_NEXT ; shows characters upto \
+CLR DISPLAY_TEXT
+MAIN_SKIP:
+
+
+JNB CLEAR_TEXT, MAIN_SKIP2
+MOV 40H, #20H
+MOV 41H, #5CH
+CLR CLEAR_TEXT
+MAIN_SKIP2:
+
+SETB RS0
+AJMP BEGIN
+
+
+
+
+
+
+;CLR_LINE:
+;
+;MOV R6, #7
+;ASDF:
+;MOV R7, #16
+;CLR DIN
+;HEREEE:
+;SETB CLK
+;
+;CLR CLK
+;
+;DJNZ R7, HEREEE
+;DJNZ R6, ASDF
+;RET
+
+
+
+
+CONFIGURE:
+MOV WADDR, #00h
+MOV WDATA, #00h  ;nop
+
+MOV R2,#8
+QWERTY:
+ACALL SEND
+
+DJNZ R2, QWERTY
+
+SETB CS
+CLR CS
+
+
+MOV WADDR, #09h
+MOV WDATA, #00h  ;decoding BCD
+;CLR CS
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+MOV DPTR, #BRIGHTNESS
+MOV A, BRIGHT
+MOVC A, @A+DPTR
+
+MOV WADDR, #0Ah
+MOV WDATA, A  ;brightness 
+;CLR CS
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+MOV WADDR, #0bh
+MOV WDATA, #07h  ;scanlimit；8 LEDs
+;CLR CS
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+MOV WADDR, #0ch
+MOV WDATA, #01h  ;power-down mode：0，normal mode：1
+;CLR CS
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+MOV WADDR, #0fh
+MOV WDATA, #00h  ;test display：1；EOT，display：0
+;CLR CS
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+
+MOV WADDR, #00h
+MOV WDATA, #00h  ;nop
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+ACALL SEND
+SETB CS
+nop
+CLR CS
+
+RET
+
+SEND:
+;CLR CS
+
+MOV A, WADDR
+
+MOV R4, #8
+FIRST:
+RLC A
+MOV DIN, C
+SETB CLK
+CLR CLK
+DJNZ r4, FIRST
+
+MOV A, WDATA
+
+MOV R4, #8
+SECOND:
+RLC A
+MOV DIN, C
+SETB CLK
+CLR CLK
+DJNZ r4, SECOND
+
+
+
+RET
+
+
+
+READSHIFT:
+MOV R1, #0B1h
+MOV R7, #63
+SHIFT:
+MOV A, @R1
+DEC R1
+MOV @r1, A
+INC R1
+INC R1
+DJNZ r7, shift  ;r1 now points to F0h
+
+DEC R1
+
+READ:
+
+		JB STILL_SENDING, ELSE_1
+		inc char_to_send
+		MOV R0, char_to_send
+		MOV A, @R0
+		CJNE A, #'\', NO_PROB
+		MOV CHAR_TO_SEND, #3Fh
+		SJMP READ
+	NO_PROB:
+		MOV INDEX_IN_CHAR, #1
+		SETB STILL_SENDING
+		SJMP END_IF_1
+
+	ELSE_1: INC INDEX_IN_CHAR
+
+
+	END_IF_1:
+	
+		MOV DPTR, #CHAR_MAP
+		MOV R0, char_to_send
+		MOV A, @r0
+		CLR C
+		SUBB A, #20h
+		CJNE A, #1, $+3
+		JC FIRST_CHAR
+		MOV R7, A
+FIND_LUT:
+		MOV A,DPL
+		ADD A, #8
+		MOV DPL, A
+		MOV A, DPH
+		ADDC A, #0
+		MOV DPH, A
+
+		DJNZ R7, FIND_LUT
+FIRST_CHAR:
+		CLR A
+		MOVC A, @A+DPTR 	; A now has the length of the char
+		MOV TEMP, A
+		INC TEMP		; temp now holds length + 1
+		MOV A, INDEX_IN_CHAR
+		CJNE A, TEMP, $+3
+		JC STILL_INSIDE
+		CLR STILL_SENDING
+		AJMP READ
+STILL_INSIDE:		
+		MOV A, INDEX_IN_CHAR
+
+		MOVC A, @A+DPTR ; get the proper column
+
+		MOV @R1, A 	; append last data
+		INC LOCATION
+		MOV A, LOCATION
+		CJNE A, #32, $+3
+		JC CONTINUE
+		MOV LOCATION, #0
+		CONTINUE:
+RET
+
+
+ EX0ISR:
+ 	CLR EX0
+ 	CLR IE0
+ 	CPL STOP
+ 	CLR TF0
+ 	MOV TL0, #0
+ 	MOV TH0, #0
+ 	MOV COUNTER, #0
+ 	SETB TR0
+ 	RETI
+
+ T0ISR:
+ 	PUSH ACC
+ 	MOV 120, C
+	INC COUNTER
+	MOV A, COUNTER
+	CJNE A, #10, $+3
+	JC NOOP
+	SETB EX0
+	CLR TR0
+	NOOP:
+	MOV C, 120
+	POP ACC
+	CLR IE0
+ 	RETI
+
+;------serial communication ISR---------
+SERIAL:
+MOV 125,C
+MOV C, RS0
+MOV 124, C
+PUSH ACC
+CLR RS0
+JB TI, TO_TRANS
+MOV A, SBUF
+CLR RI
+
+SJMP zxc
+TO_TRANS:
+AJMP TRANS
+zxc:
+
+CJNE A, #2AH, PROCESS_CHAR;	changes the command mode if sees *
+CPL CMODE
+CLR CMODE_SPEED
+CLR CMODE_BRIGHTNESS
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+PROCESS_CHAR:
+; process the command
+JB CMODE, COMMAND_MODE
+
+; else process the text
+MOV @R0, A
+INC R0
+CJNE A, #5CH, PROCESS_TEXT_SKIP1;	if reaches escape character \
+MOV R0, #40H;	resets the charater pointer
+PROCESS_TEXT_SKIP1:
+CJNE R0, #0A4H, PROCESS_TEXT_SKIP2
+MOV R0, #40H;	resets if not reached the max character limit(100)
+PROCESS_TEXT_SKIP2:
+
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+
+COMMAND_MODE:
+CJNE A, #73H, PROCESS_COMMAND1;	if 's'
+SETB CMODE_SPEED;	sets the speed mode if sees s after *
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+PROCESS_COMMAND1:
+CJNE A, #62H, PROCESS_COMMAND2;	if 'b'
+SETB CMODE_BRIGHTNESS;	sets the speed mode if sees s after *
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+PROCESS_COMMAND2:
+CJNE A, #64H, PROCESS_COMMAND3;	if 'd'
+SETB DISPLAY_TEXT;	sets the display mode if sees d after *
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+
+PROCESS_COMMAND3:
+CJNE A, #63H, PROCESS_COMMAND4;	if 'c'
+SETB CLEAR_TEXT;	sets the display mode if sees d after *
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+
+
+PROCESS_COMMAND4:
+JB CMODE_SPEED, SET_SPEED_MODE; if it is in speed mode goes to set the value
+JB CMODE_BRIGHTNESS, SET_BRIGHTNESS_MODE; if it is in brightness mode goes to set the value
+
+; otherwise do nothing
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+
+SET_SPEED_MODE:
+SUBB A, #2FH;	subtracts to convert from ascii
+MOV SPEED, A
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+SET_BRIGHTNESS_MODE:
+SUBB A, #2FH;	subtracts to convert from ascii
+MOV BRIGHT, A
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+
+TRANS:
+SETB TI_
+CLR TI
+POP ACC
+MOV C, 124
+MOV RS0, C
+MOV C, 125
+RETI
+
+;---------------The message to send
+MYDATA:DB 'We Are Ready',0
+
+
+
+;=========================================================
+;EEPROM METHODS
+;=========================================================
+write_data:     push acc ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA 
+    call eeprom_start
+                mov a, #0A0H
+                call send_data
+                mov a,memory_address1          ;location address
+                call send_data
+                mov a,eeprom_data              ;data to be send
+                call send_data
+                call eeprom_stop
+                pop acc ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+                ret   
+;=========================================================
+read_data:      push acc ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+    call eeprom_start
+
+                mov a, #0A0H
+                call send_data
+                mov a,memory_address1          ;location address
+                call send_data
+                call eeprom_start
+                mov a, #0A1H
+                call send_data
+                call get_data
+                call eeprom_stop
+                pop acc ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+                ret
+;=========================================================
+eeprom_start:    setb eeprom_sda_pin
+                nop
+                setb eeprom_scl_pin
+                nop
+                nop
+                clr eeprom_sda_pin
+                nop
+                clr eeprom_scl_pin
+                ret
+;=========================================================
+eeprom_stop:     clr eeprom_sda_pin
+                nop
+                setb eeprom_scl_pin
+                nop
+                nop
+                setb eeprom_sda_pin
+                nop
+                clr eeprom_scl_pin
+                ret
+;=========================================================
+send_data:      push 7 ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+    mov r7,#00h
+sendx:           rlc a
+               mov eeprom_sda_pin,c
+               call clock
+               inc r7
+               cjne r7,#08,sendx
+               setb eeprom_sda_pin
+               jb eeprom_sda_pin,$
+              call eeprom_delay
+               call clock
+               pop 7 ;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+               ret
+;=========================================================
+get_data:      push 7;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+               mov r7,#00h
+               setb eeprom_sda_pin
+get:            mov c,eeprom_sda_pin
+               call clock
+               rlc a
+               inc r7
+               cjne r7,#08,get
+               setb eeprom_sda_pin
+               call clock
+               mov EEPROM_BUFF,a
+               pop 7;;;;;;;;;;;;;;;;;;;;;;;;;;   PROTECT DATA
+               ret
+;=========================================================
+clock:         setb eeprom_scl_pin
+               nop
+               nop
+               clr eeprom_scl_pin
+               ret
+;=========================================================
+eeprom_delay:      mov 3Fh,#11      ;delay of 3 mili seconds 
+eeprom_delay_1:    mov 3Eh,#0ffh
+                   djnz 3Eh,$
+                   djnz 3Fh,eeprom_delay_1
+                   ret
+
+;=========================================================
+
+
+update_eeprom:
+; updates the data in eeprom with ram
+CLR RS0
+MOV R1, #40H
+MOV R7, #00H
+EEPROM_UPDATE_NEXT:
+MOV  eeprom_data, @R1
+MOV memory_address1, R7
+LCAll write_data
+LCALL eeprom_delay
+INC R7
+INC R1
+CJNE R1, #0A4H, EEPROM_UPDATE_SKIP
+SJMP EEPROM_UPDATE_EXIT;	resets if not reached the max character limit(100)
+EEPROM_UPDATE_SKIP:
+CJNE @R1, #5CH, EEPROM_UPDATE_NEXT;	if reaches escape character \
+; ADDED LATER
+MOV  eeprom_data, @R1
+MOV memory_address1, R7
+LCAll write_data
+LCALL eeprom_delay
+MOV R7, #00H;	resets the character pointer
+EEPROM_UPDATE_EXIT:
+SETB RS0
+RET
+
+CHAR_MAP:
+  DB 3, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; space		;20h
+  DB 2, 01011111b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; !
+  DB 4, 00000011b, 00000000b, 00000011b, 00000000b, 00000000b, 00000000b, 00000000b ; "
+  DB 6, 00010100b, 00111110b, 00010100b, 00111110b, 00010100b, 00000000b, 00000000b ; #
+  DB 5, 00100100b, 01101010b, 00101011b, 00010010b, 00000000b, 00000000b, 00000000b ; $
+  DB 6, 01100011b, 00010011b, 00001000b, 01100100b, 01100011b, 00000000b, 00000000b ; %
+  DB 6, 00110110b, 01001001b, 01010110b, 00100000b, 01010000b, 00000000b, 00000000b ; &
+  DB 2, 00000011b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; '
+  DB 4, 00011100b, 00100010b, 01000001b, 00000000b, 00000000b, 00000000b, 00000000b ; (
+  DB 4, 01000001b, 00100010b, 00011100b, 00000000b, 00000000b, 00000000b, 00000000b ; )
+  DB 6, 00101000b, 00011000b, 00001110b, 00011000b, 00101000b, 00000000b, 00000000b ; *
+  DB 6, 00001000b, 00001000b, 00111110b, 00001000b, 00001000b, 00000000b, 00000000b ; +
+  DB 3, 10110000b, 01110000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; ,
+  DB 5, 00001000b, 00001000b, 00001000b, 00001000b, 00000000b, 00000000b, 00000000b ; -
+  DB 3, 01100000b, 01100000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; .
+  DB 5, 01100000b, 00011000b, 00000110b, 00000001b, 00000000b, 00000000b, 00000000b; /
+  DB 5, 00111110b, 01000001b, 01000001b, 00111110b, 00000000b, 00000000b, 00000000b ; 0		;30h
+  DB 4, 01000010b, 01111111b, 01000000b, 00000000b, 00000000b, 00000000b, 00000000b ; 1
+  DB 5, 01100010b, 01010001b, 01001001b, 01000110b, 00000000b, 00000000b, 00000000b ; 2
+  DB 5, 00100010b, 01000001b, 01001001b, 00110110b, 00000000b, 00000000b, 00000000b ; 3
+  DB 5, 00011000b, 00010100b, 00010010b, 01111111b, 00000000b, 00000000b, 00000000b ; 4
+  DB 5, 00100111b, 01000101b, 01000101b, 00111001b, 00000000b, 00000000b, 00000000b ; 5
+  DB 5, 00111110b, 01001001b, 01001001b, 00110000b, 00000000b, 00000000b, 00000000b ; 6
+  DB 5, 01100001b, 00010001b, 00001001b, 00000111b, 00000000b, 00000000b, 00000000b ; 7
+  DB 5, 00110110b, 01001001b, 01001001b, 00110110b, 00000000b, 00000000b, 00000000b ; 8
+  DB 5, 00000110b, 01001001b, 01001001b, 00111110b, 00000000b, 00000000b, 00000000b ; 9
+  DB 3, 00101000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; :
+  DB 3, 10000000b, 01010000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; ;
+  DB 4, 00010000b, 00101000b, 01000100b, 00000000b, 00000000b, 00000000b, 00000000b ; <
+  DB 4, 00010100b, 00010100b, 00010100b, 00000000b, 00000000b, 00000000b, 00000000b ; =
+  DB 4, 01000100b, 00101000b, 00010000b, 00000000b, 00000000b, 00000000b, 00000000b ; >
+  DB 5, 00000010b, 01011001b, 00001001b, 00000110b, 00000000b, 00000000b, 00000000b ; ?
+  DB 6, 00111110b, 01001001b, 01010101b, 01011101b, 00001110b, 00000000b, 00000000b ; @		;40h
+  DB 5, 01111110b, 00010001b, 00010001b, 01111110b, 00000000b, 00000000b, 00000000b ; A
+  DB 5, 01111111b, 01001001b, 01001001b, 00110110b, 00000000b, 00000000b, 00000000b ; B
+  DB 5, 00111110b, 01000001b, 01000001b, 00100010b, 00000000b, 00000000b, 00000000b ; C
+  DB 5, 01111111b, 01000001b, 01000001b, 00111110b, 00000000b, 00000000b, 00000000b ; D
+  DB 5, 01111111b, 01001001b, 01001001b, 01000001b, 00000000b, 00000000b, 00000000b ; E
+  DB 5, 01111111b, 00001001b, 00001001b, 00000001b, 00000000b, 00000000b, 00000000b ; F
+  DB 5, 00111110b, 01000001b, 01001001b, 01111010b, 00000000b, 00000000b, 00000000b ; G
+  DB 5, 01111111b, 00001000b, 00001000b, 01111111b, 00000000b, 00000000b, 00000000b ; H
+  DB 4, 01000001b, 01111111b, 01000001b, 00000000b, 00000000b, 00000000b, 00000000b ; I
+  DB 5, 00110000b, 01000000b, 01000001b, 00111111b, 00000000b, 00000000b, 00000000b ; J
+  DB 5, 01111111b, 00001000b, 00010100b, 01100011b, 00000000b, 00000000b, 00000000b ; K
+  DB 5, 01111111b, 01000000b, 01000000b, 01000000b, 00000000b, 00000000b, 00000000b ; L
+  DB 6, 01111111b, 00000010b, 00001100b, 00000010b, 01111111b, 00000000b, 00000000b ; M
+  DB 6, 01111111b, 00000100b, 00001000b, 00010000b, 01111111b, 00000000b, 00000000b ; N
+  DB 5, 00111110b, 01000001b, 01000001b, 00111110b, 00000000b, 00000000b, 00000000b ; O
+  DB 5, 01111111b, 00001001b, 00001001b, 00000110b, 00000000b, 00000000b, 00000000b; P		;50h
+  DB 5, 00111110b, 01000001b, 01000001b, 10111110b, 00000000b, 00000000b, 00000000b ; Q
+  DB 5, 01111111b, 00001001b, 00001001b, 01110110b, 00000000b, 00000000b, 00000000b ; R
+  DB 5, 01000110b, 01001001b, 01001001b, 00110010b, 00000000b, 00000000b, 00000000b ; S
+  DB 6, 00000001b, 00000001b, 01111111b, 00000001b, 00000001b, 00000000b, 00000000b ; T
+  DB 5, 00111111b, 01000000b, 01000000b, 00111111b, 00000000b, 00000000b, 00000000b ; U
+  DB 6, 00001111b, 00110000b, 01000000b, 00110000b, 00001111b, 00000000b, 00000000b ; V
+  DB 6, 00111111b, 01000000b, 00111000b, 01000000b, 00111111b, 00000000b, 00000000b; W
+  DB 6, 01100011b, 00010100b, 00001000b, 00010100b, 01100011b, 00000000b, 00000000b ; X
+  DB 6, 00000111b, 00001000b, 01110000b, 00001000b, 00000111b, 00000000b, 00000000b ; Y
+  DB 5, 01100001b, 01010001b, 01001001b, 01000111b, 00000000b, 00000000b, 00000000b ; Z
+  DB 3, 01111111b, 01000001b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; [
+  DB 5, 00000001b, 00000110b, 00011000b, 01100000b, 00000000b, 00000000b, 00000000b ; \ backslash
+  DB 3, 01000001b, 01111111b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; ]
+  DB 4, 00000010b, 00000001b, 00000010b, 00000000b, 00000000b, 00000000b, 00000000b; hat
+  DB 5, 01000000b, 01000000b, 01000000b, 01000000b, 00000000b, 00000000b, 00000000b ; _
+  DB 3, 00000001b, 00000010b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; `		;60h
+  DB 5, 00100000b, 01010100b, 01010100b, 01111000b, 00000000b, 00000000b, 00000000b ; a
+  DB 5, 01111111b, 01000100b, 01000100b, 00111000b, 00000000b, 00000000b, 00000000b ; b
+  DB 5, 00111000b, 01000100b, 01000100b, 00101000b, 00000000b, 00000000b, 00000000b ; c
+  DB 5, 00111000b, 01000100b, 01000100b, 01111111b, 00000000b, 00000000b, 00000000b ; d
+  DB 5, 00111000b, 01010100b, 01010100b, 00011000b, 00000000b, 00000000b, 00000000b ; e
+  DB 4, 00000100b, 01111110b, 00000101b, 00000000b, 00000000b, 00000000b, 00000000b ; f
+  DB 5, 10011000b, 10100100b, 10100100b, 01111000b, 00000000b, 00000000b, 00000000b ; g
+  DB 5, 01111111b, 00000100b, 00000100b, 01111000b, 00000000b, 00000000b, 00000000b ; h
+  DB 4, 01000100b, 01111101b, 01000000b, 00000000b, 00000000b, 00000000b, 00000000b ; i
+  DB 5, 01000000b, 10000000b, 10000100b, 01111101b, 00000000b, 00000000b, 00000000b ; j
+  DB 5, 01111111b, 00010000b, 00101000b, 01000100b, 00000000b, 00000000b, 00000000b ; k
+  DB 4, 01000001b, 01111111b, 01000000b, 00000000b, 00000000b, 00000000b, 00000000b ; l
+  DB 6, 01111100b, 00000100b, 01111100b, 00000100b, 01111000b, 00000000b, 00000000b ; m
+  DB 5, 01111100b, 00000100b, 00000100b, 01111000b, 00000000b, 00000000b, 00000000b ; n
+  DB 5, 00111000b, 01000100b, 01000100b, 00111000b, 00000000b, 00000000b, 00000000b ; o
+  DB 5, 11111100b, 00100100b, 00100100b, 00011000b, 00000000b, 00000000b, 00000000b ; p		;70h
+  DB 5, 00011000b, 00100100b, 00100100b, 11111100b, 00000000b, 00000000b, 00000000b ; q
+  DB 5, 01111100b, 00001000b, 00000100b, 00000100b, 00000000b, 00000000b, 00000000b ; r
+  DB 5, 01001000b, 01010100b, 01010100b, 00100100b, 00000000b, 00000000b, 00000000b ; s
+  DB 4, 00000100b, 00111111b, 01000100b, 00000000b, 00000000b, 00000000b, 00000000b ; t
+  DB 5, 00111100b, 01000000b, 01000000b, 01111100b, 00000000b, 00000000b, 00000000b ; u
+  DB 6, 00011100b, 00100000b, 01000000b, 00100000b, 00011100b, 00000000b, 00000000b ; v
+  DB 6, 00111100b, 01000000b, 00111100b, 01000000b, 00111100b, 00000000b, 00000000b ; w
+  DB 6, 01000100b, 00101000b, 00010000b, 00101000b, 01000100b, 00000000b, 00000000b ; x
+  DB 5, 10011100b, 10100000b, 10100000b, 01111100b, 00000000b, 00000000b, 00000000b ; y
+  DB 4, 01100100b, 01010100b, 01001100b, 00000000b, 00000000b, 00000000b, 00000000b ; z
+  DB 4, 00001000b, 00110110b, 01000001b, 00000000b, 00000000b, 00000000b, 00000000b ; {
+  DB 2, 01111111b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b, 00000000b ; |
+  DB 4, 01000001b, 00110110b, 00001000b, 00000000b, 00000000b, 00000000b, 00000000b ; }
+  DB 5, 00001000b, 00000100b, 00001000b, 00000100b, 00000000b, 00000000b, 00000000b ; ~
+
+SPEED_OPTS:
+ DB 180, 150, 130, 110, 95, 79, 68, 59, 40, 20
+
+BRIGHTNESS:
+ DB 00h, 02h, 03h, 05h, 07h, 08h, 09h, 0Bh, 0Dh, 0Fh
+
+TEST_DATA:
+ DB 'Istanbul - Duzce - Bolu - Ankara      11:30       -$#{[]}*]} deneme 1 2 3 ses, se a se    \'
+
+END
+
